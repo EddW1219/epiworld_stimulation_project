@@ -1,1 +1,146 @@
 
+#include "../../epiworld.hpp"
+
+using namespace epiworld;
+
+enum States : size_t {
+    Susceptible = 0u,
+    Infected,
+    Infected_Hospitalized
+};
+
+// Define the three locations
+enum Locations : size_t {
+    Community = 0u,
+    Home,
+    Hospital
+};
+
+// Variable to control the number of people moving between places
+size_t num_people_moving = 10;
+
+// A sampler that excludes infected from the hospital
+auto sampler_suscept = sampler::make_sample_virus_neighbors<>(
+    {States::Infected_Hospitalized}
+);
+
+/**
+ * Update function for susceptible individuals
+ */
+inline void update_susceptible(Agent<int> * p, Model<int> * m)
+{
+    auto virus = sampler_suscept(p, m);
+    if (virus != nullptr)
+    {
+        if (m->par("Prob hospitalization") > m->runif())
+            p->set_virus(*virus, m, States::Infected_Hospitalized);
+        else
+            p->set_virus(*virus, m, States::Infected);
+    }
+
+    return;
+}
+
+/**
+ * Update function for infected individuals
+ */
+inline void update_infected(Agent<int> * p, Model<int> * m)
+{
+    // Vector of probabilities for transitions (no recovery)
+    std::vector<epiworld_double> probs = {
+        m->par("Prob hospitalization"), // Probability of hospitalization
+        1.0 - m->par("Prob hospitalization") // Probability of staying infected
+    };
+
+    // Sampling outcome
+    int res = roulette<>(probs, m);
+
+    if (res == 0)
+        p->change_state(m, States::Infected_Hospitalized);
+
+    // If res == 1, the agent remains infected (no recovery logic)
+
+    return;
+}
+
+/**
+ * Update function for infected individuals in the hospital
+ */
+inline void update_infected_hospitalized(Agent<int> * p, Model<int> * m)
+{
+    // Individuals in the hospital can either stay infected or be discharged
+    if (m->par("Discharge infected") > m->runif()) {
+        p->change_state(m, States::Infected);
+    }
+
+    // No recovery logic (stay infected)
+
+    return;
+}
+
+/**
+ * Function to move individuals between locations
+ */
+void move_individuals(Model<int> * m, size_t num_moving)
+{
+    auto & agents = m->get_agents();
+
+    for (size_t i = 0; i < num_moving; ++i)
+    {
+        size_t agent_idx = static_cast<size_t>(m->runif() * agents.size());
+        auto & agent = agents[agent_idx];
+
+        // Randomly choose a location to move to
+        size_t current_location = agent.get_data(0); // Assume location stored in data[0]
+        size_t new_location = static_cast<size_t>(m->runif() * 3); // 0 = Community, 1 = Home, 2 = Hospital
+
+        if (current_location != new_location)
+        {
+            agent.set_data(0, new_location); // Update location
+
+            // Check infection probability during movement
+            if (agent.get_state() == States::Susceptible && m->runif() < 0.3)
+                agent.change_state(m, States::Infected);
+        }
+    }
+}
+
+int main() {
+
+    // Using the mixing model as a baseline
+    Model<int> model;
+
+    model.add_state("Susceptible", update_susceptible); // State 0
+    model.add_state("Infected", update_infected);       // State 1
+    model.add_state("Infected (hospitalized)", update_infected_hospitalized); // State 2         
+
+    // Adding a new virus
+    Virus<> mrsa("MRSA");
+    mrsa.set_state(1, 0, 0);
+    mrsa.set_prob_infecting(.1);
+    mrsa.set_prob_recovery(0.0); // No recovery probability
+    mrsa.set_distribution(distribute_virus_randomly<>(0.01));
+    model.add_virus(mrsa);
+
+    // Add a population
+    model.agents_smallworld(1000, 4, 0.1, false);
+
+    // Initialize locations for all agents (start in Community)
+    for (auto & agent : model.get_agents()) {
+        agent.set_data(0, Community); // Set data[0] to represent the agent's location
+    }
+
+    model.add_param(0.1, "Prob hospitalization");
+    model.add_param(0.0, "Prob recovery"); // Recovery probability is set to 0
+    model.add_param(0.1, "Discharge infected");
+
+    // Run the model
+    for (size_t t = 0; t < 100; ++t) {
+        move_individuals(&model, num_people_moving); // Move individuals each time step
+        model.run(1); // Run one step of the model
+    }
+
+    model.print();
+
+    return 0;
+}
